@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EduJurnal | Uji RLS v0.3</title>
+<style>
+body{font-family:system-ui,Arial;background:#f0f5f2;color:#173d2b;margin:0;padding:18px}
+main{max-width:680px;margin:20px auto;background:white;padding:24px;border-radius:18px;box-shadow:0 8px 30px #1232}
+h1{margin-top:0;color:#176039}label{display:block;font-weight:650;margin:14px 0 5px}
+input,select,button{box-sizing:border-box;width:100%;padding:13px;border-radius:9px;font:inherit}
+input,select{border:1px solid #c9d6d0}button{background:#166534;color:white;border:0;margin-top:12px;cursor:pointer}
+button.secondary{background:#405c52}button:disabled{opacity:.55}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef5f1;padding:14px;border-radius:10px;font-size:13px}
+small{color:#53665b}.hidden{display:none}.warning{background:#fff5dd;padding:12px;border-radius:8px}
+</style></head><body><main>
+<h1>EduJurnal</h1><p>Uji login dan keamanan RLS siswa <b>v0.3</b></p>
+<label for="url">Project URL Supabase</label><input id="url" placeholder="https://...supabase.co">
+<label for="key">Publishable / anon key</label><input id="key" placeholder="sb_publishable_...">
+<small>Jangan masukkan secret atau service_role key.</small>
+<button id="save">Simpan konfigurasi perangkat ini</button>
+<section id="loginBox"><label for="email">Email</label><input id="email" type="email" autocomplete="username">
+<label for="password">Password</label><input id="password" type="password" autocomplete="current-password">
+<button id="login">Masuk</button></section>
+<section id="logged" class="hidden"><p id="identity"></p>
+<button id="schools">Periksa akses sekolah</button><button id="students">Periksa data siswa & RLS</button>
+<h3>Uji INSERT siswa</h3><p class="warning">Gunakan hanya data fiktif. Pengujian menulis data uji ke database; tidak otomatis dihapus.</p>
+<label for="target">Target sekolah</label><select id="target"><option value="">Pilih target...</option><option value="own">Sekolah sendiri</option><option value="other">Sekolah lain (uji penolakan)</option></select>
+<button id="insert">Uji INSERT (dengan konfirmasi)</button><button id="logout" class="secondary">Keluar</button>
+</section><h3>Hasil pemeriksaan</h3><pre id="result">Belum ada pemeriksaan.</pre>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+(()=>{'use strict';
+const $=id=>document.getElementById(id), output=o=>{$('result').textContent=typeof o==='string'?o:JSON.stringify(o,null,2)};
+let client=null,user=null;
+$('url').value=localStorage.getItem('ej_url')||'';
+$('key').value=localStorage.getItem('ej_key')||'';
+function setup(){
+ const url=$('url').value.trim(),key=$('key').value.trim();
+ if(!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/.test(url)||!key)throw Error('Isi Project URL dan publishable key yang benar.');
+ if(!window.supabase?.createClient)throw Error('Library Supabase tidak berhasil dimuat.');
+ client=window.supabase.createClient(url,key,{auth:{persistSession:true,autoRefreshToken:true}});
+ return client;
+}
+function view(u){user=u;$('loginBox').classList.toggle('hidden',!!u);$('logged').classList.toggle('hidden',!u);$('identity').textContent=u?'Login: '+u.email:'';}
+async function init(){try{setup();const {data,error}=await client.auth.getUser();if(error&&!/session missing/i.test(error.message))output(error.message);view(data?.user||null)}catch(e){output(e.message)}}
+$('save').onclick=async()=>{try{localStorage.setItem('ej_url',$('url').value.trim());localStorage.setItem('ej_key',$('key').value.trim());await init();output('Konfigurasi tersimpan.')}catch(e){output(e.message)}};
+$('login').onclick=async()=>{try{setup();const {data,error}=await client.auth.signInWithPassword({email:$('email').value.trim(),password:$('password').value});if(error)throw error;view(data.user);output('Login berhasil.')}catch(e){output(e.message)}};
+$('logout').onclick=async()=>{try{const {error}=await client.auth.signOut();if(error)throw error;view(null);output('Berhasil keluar.')}catch(e){output(e.message)}};
+async function read(table,cols='*'){const {data,error}=await client.from(table).select(cols);if(error)throw error;return data||[]}
+async function membership(){return read('school_memberships','school_id,role')}
+async function schools(){return read('schools','id,name,code')}
+$('schools').onclick=async()=>{try{output({akun:user?.email,sekolah:await schools(),keanggotaan:await membership()})}catch(e){output(e.message)}};
+$('students').onclick=async()=>{try{const s=await schools(),st=await read('students','school_id,student_number,full_name,class_id');output({akun:user?.email,sekolah_terlihat:s.map(x=>x.code),siswa_terlihat:st.filter(x=>x.student_number.startsWith('TEST-')).map(x=>({nomor:x.student_number,nama:x.full_name,sekolah:s.find(z=>z.id===x.school_id)?.code||x.school_id}))})}catch(e){output(e.message)}};
+$('insert').onclick=async()=>{
+ try{
+ if(!user)throw Error('Login dahulu.');
+ const mode=$('target').value;if(!mode)throw Error('Pilih target sekolah.');
+ const ss=await schools(),ms=await membership();
+ const own=ss.find(s=>ms.some(m=>m.school_id===s.id&&m.role==='school_admin'));
+ if(!own)throw Error('Akun tidak memiliki keanggotaan school_admin.');
+ const other=mode==='other';
+ // Target lintas sekolah memakai UUID sekolah uji yang diketahui, tanpa perlu SELECT lintas sekolah.
+ const demo='9ec0e468-30e0-4008-a397-5d63f58aa8e6';
+ const haromain='7cc54ec3-d2e4-4d6d-b471-2dac20270c82';
+ const targetId=other?(own.id===demo?haromain:demo):own.id;
+ if(other&&targetId===own.id)throw Error('Target sekolah lain tidak valid.');
+ // Untuk uji lintas sekolah, gunakan kelas target yang telah disiapkan. RLS dapat menyembunyikan kelas target.
+ // Menggunakan ID kelas yang diketahui melalui SQL Editor agar kegagalan benar-benar dapat dibedakan.
+ const cl=await read('classes','id,school_id,name');
+ const selected=cl.find(c=>c.school_id===targetId);
+ if(!selected){
+   output({status:'PERLU_ID_KELAS_TARGET',keterangan:'Kelas sekolah target tidak terlihat melalui RLS. Untuk uji INSERT lintas sekolah, perlu ID kelas target dari SQL Editor. Tidak ada INSERT dilakukan.'});
+   return;
+ }
+ const num='TEST-RLS-'+Date.now();
+ if(!confirm('Akan menambahkan siswa FIKTIF '+num+' ke '+(other?'SEKOLAH LAIN':'SEKOLAH SENDIRI')+'. Lanjutkan?'))return;
+ const {error}=await client.from('students').insert({school_id:targetId,class_id:selected.id,student_number:num,full_name:'Siswa Uji RLS',is_active:true});
+ output({target:other?'sekolah lain':'sekolah sendiri',nomor:num,status:error?'DITOLAK':'BERHASIL',pesan:error?.message||'INSERT diterima',catatan:other&&!error?'PERINGATAN: penulisan lintas sekolah berhasil!':null});
+ }catch(e){output({error:e.message})}
+};
+init();
+})();
+</script></body></html>
